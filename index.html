@@ -1434,7 +1434,7 @@ function bindEvents() {
     const user = els.loginUser.value.trim();
     const pass = els.loginPass.value.trim();
 
-    if (user === "MASTER" && pass === "MASTER") {
+    if (isValidLogin(user, pass)) {
       state.priceUnlocked = true;
       sessionStorage.setItem(CONFIG.authKey, "true");
       closeLogin();
@@ -1768,6 +1768,13 @@ function updateAuthView() {
   document.body.classList.toggle("price-unlocked", state.priceUnlocked);
   els.loginToggle.textContent = state.priceUnlocked ? "Sair" : "Entrar";
   els.loginToggle.setAttribute("aria-pressed", String(state.priceUnlocked));
+}
+
+function isValidLogin(user, pass) {
+  return (
+    (user === "MASTER" && pass === "MASTER") ||
+    (user === "VENDEDOR" && pass === "0022")
+  );
 }
 
 function updateViewMode() {
