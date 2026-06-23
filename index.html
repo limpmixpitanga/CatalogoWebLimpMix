@@ -538,6 +538,14 @@ h1 {
   font-size: 0.84rem;
 }
 
+.master-only {
+  display: none;
+}
+
+body.master-mode .master-only {
+  display: block;
+}
+
 .ghost-button {
   padding: 0 14px;
   color: var(--green-700);
@@ -1086,7 +1094,12 @@ body.seller-mode .seller-only {
     justify-content: center;
   }
 
-  .sidebar,
+  .sidebar {
+    position: sticky;
+    top: 128px;
+    z-index: 12;
+  }
+
   .controls {
     position: static;
   }
@@ -1253,6 +1266,7 @@ body.seller-mode .seller-only {
             <div>
               <p id="resultCount">Carregando catalogo...</p>
               <span id="activeCategory">Todos os produtos</span>
+              <span class="master-only" id="stockSummary"></span>
             </div>
             <button class="ghost-button" id="reloadCatalog" type="button">Atualizar</button>
           </section>
@@ -1323,9 +1337,10 @@ const CONFIG = {
   sheetUrl:
     "https://docs.google.com/spreadsheets/d/e/2PACX-1vRLYiPL1o-OkYjroAoab-CJ_V6hzlb-WQCXDNJpSHoQlRefI-MeUJZkckTkZFaS-AaaDCR03hawt6yW/pubhtml?gid=1870458129&single=true",
   whatsappNumber: "5542988859972",
-  cacheKey: "limpmix-catalog-cache-v2",
+  cacheKey: "limpmix-catalog-cache-v3",
   quoteKey: "limpmix-quote-v1",
   authKey: "limpmix-price-auth",
+  roleKey: "limpmix-user-role",
   viewKey: "limpmix-view-mode",
 };
 
@@ -1338,6 +1353,7 @@ const state = {
   category: "todos",
   sellerMode: readJson("limpmix-seller-mode", false),
   priceUnlocked: sessionStorage.getItem(CONFIG.authKey) === "true",
+  userRole: sessionStorage.getItem(CONFIG.roleKey) || "",
   viewMode: localStorage.getItem(CONFIG.viewKey) || "medium",
 };
 
@@ -1349,6 +1365,7 @@ const els = {
   categoryList: document.querySelector("#categoryList"),
   viewButtons: document.querySelectorAll(".view-button"),
   categoryCount: document.querySelector("#categoryCount"),
+  stockSummary: document.querySelector("#stockSummary"),
   heroProductCount: document.querySelector("#heroProductCount"),
   emptyState: document.querySelector("#emptyState"),
   reload: document.querySelector("#reloadCatalog"),
@@ -1434,9 +1451,12 @@ function bindEvents() {
     const user = els.loginUser.value.trim();
     const pass = els.loginPass.value.trim();
 
-    if (isValidLogin(user, pass)) {
+    const role = getLoginRole(user, pass);
+    if (role) {
       state.priceUnlocked = true;
+      state.userRole = role;
       sessionStorage.setItem(CONFIG.authKey, "true");
+      sessionStorage.setItem(CONFIG.roleKey, role);
       closeLogin();
       updateAuthView();
       renderProducts();
@@ -1508,7 +1528,7 @@ function setProducts(products) {
     state.category = "todos";
   }
 
-  els.heroProductCount.textContent = String(products.length);
+  els.heroProductCount.textContent = isMaster() ? String(products.length) : "--";
   renderCategories();
   applyFilters();
   renderQuote();
@@ -1528,6 +1548,8 @@ function csvToProducts(csv) {
       const barcode = item.codigo_de_barras || (hasCategoryColumn ? row[4] : row[3]) || "";
       const imageUrl = item.link_foto || (hasCategoryColumn ? row[5] : row[4]) || item.foto || "";
       const price = parsePrice(item.valor || (hasCategoryColumn ? row[6] : row[5]) || "");
+      const stockSource = item.estoque || item.saldo || item.saldo_estoque || item.qtd_estoque || item.quantidade || row[7] || "";
+      const stock = parseStock(stockSource);
       const finalCategory = categoryLabel || inferCategory(description);
 
       return {
@@ -1536,12 +1558,14 @@ function csvToProducts(csv) {
         barcode,
         imageUrl,
         price,
+        stock,
         categoryLabel: finalCategory,
         categorySlug: slugify(finalCategory),
         searchText: normalizeText(`${code} ${description} ${barcode} ${finalCategory}`),
       };
     })
     .filter((product) => product.code && product.description)
+    .filter((product) => product.stock === null || product.stock > 0)
     .filter((product) => !/^9\d{3}$/.test(product.code));
 }
 
@@ -1630,6 +1654,7 @@ function renderProducts() {
   els.emptyState.hidden = products.length > 0;
   els.activeCategory.textContent = category;
   els.resultCount.textContent = `${products.length} produto${products.length === 1 ? "" : "s"} encontrado${products.length === 1 ? "" : "s"}`;
+  els.stockSummary.textContent = isMaster() ? `Estoque total exibido: ${formatStock(totalStock(products))}` : "";
 
   els.grid.innerHTML = products
     .map(
@@ -1643,6 +1668,7 @@ function renderProducts() {
             <h2 class="product-title">${escapeHtml(product.description)}</h2>
             <div class="product-meta">
               <span>Cod. ${escapeHtml(product.code)}</span>
+              <span>Estoque: ${escapeHtml(formatStock(product.stock))}</span>
               <span class="seller-only">Barras: ${escapeHtml(product.barcode || "nao informado")}</span>
             </div>
             <div class="product-bottom">
@@ -1669,7 +1695,6 @@ function addToQuote(code) {
 
   persistQuote();
   renderQuote();
-  toggleQuote(true);
 }
 
 function updateQuoteQty(code, action) {
@@ -1758,7 +1783,9 @@ function closeLogin() {
 
 function logout() {
   state.priceUnlocked = false;
+  state.userRole = "";
   sessionStorage.removeItem(CONFIG.authKey);
+  sessionStorage.removeItem(CONFIG.roleKey);
   updateAuthView();
   renderProducts();
   renderQuote();
@@ -1766,15 +1793,22 @@ function logout() {
 
 function updateAuthView() {
   document.body.classList.toggle("price-unlocked", state.priceUnlocked);
+  document.body.classList.toggle("master-mode", isMaster());
   els.loginToggle.textContent = state.priceUnlocked ? "Sair" : "Entrar";
   els.loginToggle.setAttribute("aria-pressed", String(state.priceUnlocked));
+  if (state.products.length) {
+    els.heroProductCount.textContent = isMaster() ? String(state.products.length) : "--";
+  }
 }
 
-function isValidLogin(user, pass) {
-  return (
-    (user === "MASTER" && pass === "MASTER") ||
-    (user === "VENDEDOR" && pass === "0022")
-  );
+function getLoginRole(user, pass) {
+  if (user === "MASTER" && pass === "MASTER") return "MASTER";
+  if (user === "VENDEDOR" && pass === "0022") return "VENDEDOR";
+  return "";
+}
+
+function isMaster() {
+  return state.userRole === "MASTER";
 }
 
 function updateViewMode() {
@@ -1803,6 +1837,22 @@ function toCsvUrl(url) {
 function parsePrice(value) {
   const number = Number(String(value).replace(/\./g, "").replace(",", ".").replace(/[^\d.-]/g, ""));
   return Number.isFinite(number) ? number : 0;
+}
+
+function parseStock(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  const number = Number(raw.replace(/\./g, "").replace(",", ".").replace(/[^\d.-]/g, ""));
+  return Number.isFinite(number) ? number : null;
+}
+
+function totalStock(products) {
+  return products.reduce((sum, product) => sum + Math.max(0, product.stock ?? 0), 0);
+}
+
+function formatStock(value) {
+  if (value === null || value === undefined) return "nao informado";
+  return Number.isInteger(value) ? String(value) : value.toLocaleString("pt-BR", { maximumFractionDigits: 2 });
 }
 
 function cleanCategory(value) {
